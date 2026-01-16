@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta
+import time
 from zt_aas.core.sandbox import (
     SandboxRuntime, 
     Capability, 
@@ -77,6 +78,9 @@ class TestSandbox(unittest.TestCase):
         
         # Should be able to revoke
         self.assertTrue(self.sandbox._revoke_capability("revoke-cap"))
+        
+        # Verify capability is marked as revoked
+        self.assertTrue(self.sandbox.capabilities["revoke-cap"].revoked)
         
         # Should not be able to revoke non-existent capability
         self.assertFalse(self.sandbox._revoke_capability("nonexistent"))
@@ -176,6 +180,36 @@ class TestSandbox(unittest.TestCase):
         )
         outcome = self.sandbox.execute_action(request)
         self.assertEqual(outcome.status, ActionStatus.QUARANTINED)
+
+    def test_agent_active_status(self):
+        # Register agent
+        agent_id = "active-agent"
+        self.sandbox.register_agent(agent_id)
+        
+        # Should be able to execute action
+        cap = Capability(
+            id="active-cap",
+            action_type=ActionType.READ,
+            target="/tmp/test.txt"
+        )
+        self.sandbox.issue_capability(cap)
+        
+        request = ActionRequest(
+            capability_id="active-cap",
+            agent_id=agent_id,
+            action_type=ActionType.READ,
+            target="/tmp/test.txt"
+        )
+        outcome = self.sandbox.execute_action(request)
+        self.assertEqual(outcome.status, ActionStatus.ALLOWED)
+        
+        # Deactivate agent (correct way)
+        with self.sandbox._lock:
+            self.sandbox.active_agents[agent_id] = False
+        
+        # Should be denied now
+        outcome = self.sandbox.execute_action(request)
+        self.assertEqual(outcome.status, ActionStatus.DENIED)
 
 if __name__ == '__main__':
     unittest.main()

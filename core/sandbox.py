@@ -9,6 +9,8 @@ import time
 import uuid
 from datetime import datetime
 import hashlib
+import threading
+import os
 
 # --- Types and Enums ---
 
@@ -60,6 +62,7 @@ class ActionOutcome:
 
 class SandboxRuntime:
     def __init__(self):
+        self._lock = threading.RLock()
         self.capabilities: Dict[str, Capability] = {}
         self.policy_engine = PolicyEngine()
         self.mediator = ActionMediator()
@@ -69,54 +72,73 @@ class SandboxRuntime:
 
     def register_agent(self, agent_id: str) -> None:
         """Register an agent with the sandbox."""
-        if agent_id in self.active_agents:
-            raise ValueError(f"Agent {agent_id} already registered")
-        self.active_agents[agent_id] = True
+        with self._lock:
+            if agent_id in self.active_agents:
+                raise ValueError(f"Agent {agent_id} already registered")
+            self.active_agents[agent_id] = True
 
     def issue_capability(self, capability: Capability) -> None:
         """Issue a new capability to the sandbox."""
-        if capability.id in self.capabilities:
-            raise ValueError(f"Capability {capability.id} already exists")
-        self.capabilities[capability.id] = capability
+        with self._lock:
+            if capability.id in self.capabilities:
+                raise ValueError(f"Capability {capability.id} already exists")
+            
+            # Validate constraints
+            valid_constraint_keys = {'max_size', 'rate_limit', 'allowed_methods'}
+            if not set(capability.constraints.keys()).issubset(valid_constraint_keys):
+                invalid = set(capability.constraints.keys()) - valid_constraint_keys
+                raise ValueError(f"Invalid constraint keys: {invalid}")
+            
+            self.capabilities[capability.id] = capability
 
     def execute_action(self, request: ActionRequest) -> ActionOutcome:
         """Execute an action on behalf of an agent."""
-        # Check quarantine status first
-        if request.agent_id in self.quarantined_agents:
-            return self._quarantine_action(request, "Agent is quarantined")
+        with self._lock:
+            # Validate request fields
+            if not request.capability_id or not request.agent_id or not request.target:
+                return self._deny_action(request, "Invalid request: missing required fields")
 
-        # Validate agent
-        if request.agent_id not in self.active_agents:
-            return self._deny_action(request, "Agent not registered")
+            # Check quarantine status first
+            if request.agent_id in self.quarantined_agents:
+                return self._quarantine_action(request, "Agent is quarantined")
 
-        # Check capability exists and is valid
-        capability = self.capabilities.get(request.capability_id)
-        if not capability:
-            return self._deny_action(request, "Capability not found")
+            # Validate agent is active
+            if request.agent_id not in self.active_agents or not self.active_agents[request.agent_id]:
+                return self._deny_action(request, "Agent not registered or inactive")
 
-        # Check expiration
-        if capability.duration is not None:
-            elapsed = (datetime.now() - capability.issued_at).total_seconds()
-            if elapsed > capability.duration:
-                self._revoke_capability(capability.id)
-                return self._deny_action(request, "Capability expired")
+            # Check capability exists and is valid
+            capability = self.capabilities.get(request.capability_id)
+            if not capability:
+                return self._deny_action(request, "Capability not found")
 
-        # Validate scope strictly
-        if not self._validate_scope(request, capability):
-            return self._deny_action(request, "Scope violation: action type or target mismatch")
+            # Check if capability has been revoked
+            if capability.revoked:
+                return self._deny_action(request, "Capability has been revoked")
 
-        # Validate policy
-        policy_result = self.policy_engine.validate_request(request, capability)
-        if not policy_result.is_allowed:
-            return self._deny_action(request, f"Policy violation: {policy_result.reason}")
+            # Check expiration
+            if capability.duration is not None:
+                current_time = datetime.now()
+                elapsed = (current_time - capability.issued_at).total_seconds()
+                if elapsed > capability.duration:
+                    self._revoke_capability(capability.id)
+                    return self._deny_action(request, "Capability expired")
 
-        # Mediate action
-        outcome = self.mediator.handle_action(request, capability)
-        
-        # Log outcome
-        self.audit_log.log(outcome)
-        
-        return outcome
+            # Validate scope strictly
+            if not self._validate_scope(request, capability):
+                return self._deny_action(request, "Scope violation: action type or target mismatch")
+
+            # Validate policy
+            policy_result = self.policy_engine.validate_request(request, capability)
+            if not policy_result.is_allowed:
+                return self._deny_action(request, f"Policy violation: {policy_result.reason}")
+
+            # Mediate action
+            outcome = self.mediator.handle_action(request, capability)
+            
+            # Log outcome
+            self.audit_log.log(outcome)
+            
+            return outcome
 
     def _validate_scope(self, request: ActionRequest, capability: Capability) -> bool:
         """Strictly validate that the request matches the capability scope."""
@@ -152,14 +174,16 @@ class SandboxRuntime:
 
     def _revoke_capability(self, capability_id: str) -> bool:
         """Revoke a capability immediately."""
-        if capability_id in self.capabilities:
-            self.capabilities[capability_id].revoked = True
-            return True
-        return False
+        with self._lock:
+            if capability_id in self.capabilities:
+                self.capabilities[capability_id].revoked = True
+                return True
+            return False
 
     def quarantine_agent(self, agent_id: str) -> None:
         """Quarantine an agent from further actions."""
-        self.quarantined_agents[agent_id] = True
+        with self._lock:
+            self.quarantined_agents[agent_id] = True
 
 # --- Policy Engine ---
 
@@ -189,12 +213,25 @@ class PolicyEngine:
     def _is_network_allowed(self, domain: str) -> bool:
         # Example: only allow specific domains
         allowed_domains = ["api.example.com", "data.example.com"]
-        return any(domain.endswith(allowed) for allowed in allowed_domains)
+        for allowed in allowed_domains:
+            # Exact match
+            if domain == allowed:
+                return True
+            # Subdomain match (e.g., "v1.api.example.com" matches "api.example.com")
+            if domain.endswith(f".{allowed}"):
+                return True
+        return False
 
     def _is_file_access_allowed(self, path: str) -> bool:
         # Example: only allow access to specific directories
         allowed_prefixes = ["/tmp/", "/data/"]
-        return any(path.startswith(prefix) for prefix in allowed_prefixes)
+        # Normalize and ensure absolute path
+        normalized_path = os.path.abspath(os.path.normpath(path))
+        
+        # Normalize allowed prefixes too
+        normalized_prefixes = [os.path.abspath(p) for p in allowed_prefixes]
+        
+        return any(normalized_path.startswith(prefix) for prefix in normalized_prefixes)
 
 # --- Action Mediator ---
 
@@ -220,11 +257,24 @@ class ActionMediator:
                 side_effects=[f"Performed {request.action_type.value} on {request.target}"],
                 resource_usage={"cpu": 0.1, "memory": 1024}
             )
-        except Exception as e:
+        except PermissionError as e:
             return ActionOutcome(
                 request=request,
                 status=ActionStatus.DENIED,
-                error=str(e)
+                error=f"Permission denied: {str(e)}"
+            )
+        except FileNotFoundError as e:
+            return ActionOutcome(
+                request=request,
+                status=ActionStatus.DENIED,
+                error=f"Resource not found: {str(e)}"
+            )
+        except Exception as e:
+            # Log unexpected errors for investigation
+            return ActionOutcome(
+                request=request,
+                status=ActionStatus.DENIED,
+                error=f"Unexpected error: {str(e)}"
             )
 
     def _read_file(self, path: str) -> str:
@@ -250,43 +300,54 @@ class AuditLog:
         self.entries: List[ActionOutcome] = []
         self.sequence_counter = 0
         self.head_hash = ""
+        self._lock = threading.RLock()
 
     def log(self, outcome: ActionOutcome) -> None:
-        # Assign sequence number
-        outcome.sequence_number = self.sequence_counter
-        self.sequence_counter += 1
-        
-        # Compute hash chain
-        if not self.entries:
-            outcome.hash_chain = hashlib.sha256(b"").hexdigest()
-        else:
-            prev_entry = self.entries[-1]
-            combined_data = f"{prev_entry.hash_chain}{str(outcome)}".encode('utf-8')
-            outcome.hash_chain = hashlib.sha256(combined_data).hexdigest()
-        
-        self.entries.append(outcome)
+        with self._lock:
+            # Assign sequence number
+            outcome.sequence_number = self.sequence_counter
+            self.sequence_counter += 1
+            
+            # Create deterministic hash input
+            prev_hash = self.entries[-1].hash_chain if self.entries else ""
+            hash_input = (
+                f"{prev_hash}"
+                f"{outcome.sequence_number}"
+                f"{outcome.request.agent_id}"
+                f"{outcome.request.action_type.value}"
+                f"{outcome.request.target}"
+                f"{outcome.status.value}"
+                f"{outcome.request.timestamp.isoformat()}"
+            ).encode('utf-8')
+            
+            outcome.hash_chain = hashlib.sha256(hash_input).hexdigest()
+            
+            self.entries.append(outcome)
 
     def get_trace(self, agent_id: str) -> List[ActionOutcome]:
-        return [e for e in self.entries if e.request.agent_id == agent_id]
+        with self._lock:
+            return [e for e in self.entries if e.request.agent_id == agent_id]
 
     def export_trace(self, agent_id: str) -> str:
-        trace = self.get_trace(agent_id)
-        lines = []
-        for entry in trace:
-            lines.append(f"[{entry.request.timestamp}] {entry.request.action_type.value} {entry.request.target}")
-            if entry.status == ActionStatus.DENIED:
-                lines.append(f"  DENIED: {entry.error}")
-            elif entry.status == ActionStatus.QUARANTINED:
-                lines.append(f"  QUARANTINED: {entry.error}")
-            else:
-                lines.append(f"  ALLOWED: {entry.result}")
-        return "\n".join(lines)
+        with self._lock:
+            trace = self.get_trace(agent_id)
+            lines = []
+            for entry in trace:
+                lines.append(f"[{entry.request.timestamp}] {entry.request.action_type.value} {entry.request.target}")
+                if entry.status == ActionStatus.DENIED:
+                    lines.append(f"  DENIED: {entry.error}")
+                elif entry.status == ActionStatus.QUARANTINED:
+                    lines.append(f"  QUARANTINED: {entry.error}")
+                else:
+                    lines.append(f"  ALLOWED: {entry.result}")
+            return "\n".join(lines)
 
     def get_head_hash(self) -> str:
         """Get the current head hash for tamper-evidence."""
-        if not self.entries:
-            return ""
-        return self.entries[-1].hash_chain
+        with self._lock:
+            if not self.entries:
+                return ""
+            return self.entries[-1].hash_chain
 
 # --- Example Usage ---
 

@@ -14,17 +14,17 @@ The system enforces strict capability-based security where agents present tokens
 
 <pre>
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐
-│    Agent    │    │  Capability  │    │   Policy     │
+│   Agent     │    │  Capability  │    │   Policy     │
 │             │───▶│   Issuer     │───▶│   Engine     │
 └─────────────┘    └──────────────┘    └──────────────┘
-       │                   │                   │
-       ▼                   ▼                   ▼
+       │                   │                  │
+       ▼                   ▼                  ▼
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐
-│  Sandbox    │    │   Mediator   │    │  Audit Log   │
-│  Runtime    │───▶│              │───▶│              │
+│  Sandbox    │    │   Mediator   │    │   Audit Log  │
+│   Runtime   │───▶│              │───▶│              │
 └─────────────┘    └──────────────┘    └──────────────┘
-       │                   │                   │
-       ▼                   ▼                   ▼
+       │                   │                  │
+       ▼                   ▼                  ▼
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐
 │  External   │    │  Resource    │    │  Forensic    │
 │  Systems    │    │  Access      │    │  Analysis    │
@@ -76,7 +76,7 @@ outcome = sandbox.execute_action(request)
 - **Containment**: No direct access to external systems
 
 ## What ZT-AAS Is Not
-ZT-AAS is not:
+### ZT-AAS is not:
 - An agent framework
 - A planner or reasoning engine
 - A productivity or automation tool
@@ -86,11 +86,11 @@ ZT-AAS is not:
 This system enforces strict containment and governance, not agent assistance or cooperation. It is designed to prevent misuse of authority, not to enable it.
 
 ## Requirements
-1. All agent actions must pass through the sandbox runtime
-2. Capabilities are first-class objects with explicit grants
-3. Policy engine validates all capability usage
-4. Audit logs are tamper-evident and replayable
-5. Failure modes are deterministic and configurable
-6. No transitive authority or permission inheritance
-7. All interactions must be logged and traceable
-8. Capabilities can be revoked mid-execution
+- All agent actions must pass through the sandbox runtime
+- Capabilities are first-class objects with explicit grants
+- Policy engine validates all capability usage
+- Audit logs are tamper-evident and replayable
+- Failure modes are deterministic and configurable
+- No transitive authority or permission inheritance
+- All interactions must be logged and traceable
+- Capabilities can be revoked mid-execution
